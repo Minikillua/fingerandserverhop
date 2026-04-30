@@ -14,20 +14,25 @@ local islandCenters = {
     Vector3.new(4166.26025390625, 22.594202041625977, 160.32601928710938),
 }
 
--- Função de server hop
+-- Função de server hop aleatório
 local function serverHop()
-    local cursor = ""
     local success, result = pcall(function()
         return HttpService:JSONDecode(game:HttpGet(
-            "https://games.roblox.com/v1/games/"..placeId.."/servers/Public?sortOrder=Asc&limit=100"..(cursor ~= "" and "&cursor="..cursor or "")
+            "https://games.roblox.com/v1/games/"..placeId.."/servers/Public?sortOrder=Asc&limit=100"
         ))
     end)
     if success and result and result.data then
+        local servers = {}
         for _, server in pairs(result.data) do
-            if server.playing < server.maxPlayers then
-                TeleportService:TeleportToPlaceInstance(placeId, server.id, player)
-                return
+            if server.playing < server.maxPlayers and server.id ~= game.JobId then
+                table.insert(servers, server)
             end
+        end
+        if #servers > 0 then
+            local randomServer = servers[math.random(1, #servers)]
+            TeleportService:TeleportToPlaceInstance(placeId, randomServer.id, player)
+        else
+            warn("Nenhum servidor válido encontrado para hop.")
         end
     end
 end
@@ -88,17 +93,17 @@ local function inject()
         end)
     end
 
-    -- voo rápido
+    -- voo ajustado (um pouco mais lento e suave)
     local function flyTo(targetPos)
         if not character or not character.PrimaryPart then return end
         local startPos = character.PrimaryPart.Position
-        local steps = 30
+        local steps = 40 -- mais passos
         for i = 1, steps do
             if not scanningIslands then break end
             local alpha = i / steps
             local newPos = startPos:Lerp(targetPos, alpha)
             character:SetPrimaryPartCFrame(CFrame.new(newPos))
-            task.wait(0.1) -- rápido mas suave
+            task.wait(0.15) -- mais lento que antes
         end
     end
 
@@ -109,7 +114,7 @@ local function inject()
                 for _, pos in ipairs(islandCenters) do
                     if not scanningIslands then break end
                     flyTo(pos)
-                    task.wait(1.5)
+                    task.wait(2) -- espera maior entre ilhas
                     scanDrops()
                     if #fingers > 0 then
                         found = true
