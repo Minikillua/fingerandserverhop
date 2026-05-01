@@ -81,11 +81,10 @@ local function trocar_servidor()
         cursor = result.NextPageCursor
     until cursor == nil or tentativas >= 5
 
-    -- Sem servidores novos, reseta lista
-    print("Sem servidores novos, resetando lista...")
-    _G.visited_servers = {}
-    _G.visited_servers[game.JobId] = true
-    ts:Teleport(placeId, plr)
+    -- Se não achou nenhum servidor novo, não volta pro mesmo
+    print("Nenhum servidor novo encontrado, tentando novamente em alguns segundos...")
+    task.wait(5)
+    trocar_servidor()
 end
 
 local function process_queue()
