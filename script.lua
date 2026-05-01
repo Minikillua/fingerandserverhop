@@ -1,163 +1,194 @@
-local player = game.Players.LocalPlayer
-local TeleportService = game:GetService("TeleportService")
-local HttpService = game:GetService("HttpService")
-local placeId = game.PlaceId
+local players = game:GetService("Players")
+local tws = game:GetService("TweenService")
+local ts = game:GetService("TeleportService")
 
--- Lista das posições centrais das ilhas
-local islandCenters = {
-    Vector3.new(155.707275390625, 911.93701171875, 2838.251953125),
-    Vector3.new(-66.57591247558594, 197.21002197265625, 452.09735107421875),
-    Vector3.new(4131.4423828125, 86.53740692138672, 5892.42626953125),
-    Vector3.new(-2903.63134765625, 208.41400146484375, 7126.85986328125),
-    Vector3.new(80.08580017089844, 223.35675048828125, 8428.873046875),
-    Vector3.new(-1946.633056640625, 169.32435607910156, 4541.62109375),
-    Vector3.new(4166.26025390625, 22.594202041625977, 160.32601928710938),
-}
+local plr = players.LocalPlayer
+local char = plr.Character or plr.CharacterAdded:Wait()
+local hrp = char:WaitForChild("HumanoidRootPart")
+local hum = char:WaitForChild("Humanoid")
 
--- Função de server hop aleatório
-local function serverHop()
-    local success, result = pcall(function()
-        return HttpService:JSONDecode(game:HttpGet(
-            "https://games.roblox.com/v1/games/"..placeId.."/servers/Public?sortOrder=Asc&limit=100"
-        ))
-    end)
-    if success and result and result.data then
-        local servers = {}
-        for _, server in pairs(result.data) do
-            if server.playing < server.maxPlayers and server.id ~= game.JobId then
-                table.insert(servers, server)
+local drops_path = workspace:WaitForChild("Drops")
+local finger_queue = {}
+local collecting = false
+local waiting_for_finger = false
+
+-- Carrega servidores visitados de sessão anterior
+local visited_servers = _G.visited_servers or {}
+visited_servers[game.JobId] = true
+_G.visited_servers = visited_servers
+
+local function character_available()
+    local available = false
+    char = plr.Character
+    if not char then return available end
+    hrp = char:FindFirstChild("HumanoidRootPart")
+    hum = char:FindFirstChildOfClass("Humanoid")
+    local ingame_hp = char:FindFirstChild("Health")
+    if not ingame_hp or ingame_hp.Value <= 0 then return available end
+    if hrp and hum then available = true end
+    return available
+end
+
+local function go_to_pos_wait(pos, magnitude)
+    if not character_available() then return end
+    local time_ = math.clamp(magnitude / 200, 0.01, 15)
+    if typeof(pos) == "Vector3" then pos = CFrame.new(pos) end
+    local tween = tws:Create(hrp, TweenInfo.new(time_), {CFrame = pos})
+    tween:Play()
+    tween.Completed:Wait()
+    if hrp then hrp.Anchored = false end
+end
+
+local function get_finger_pos(finger)
+    local x = finger:FindFirstChild("x")
+    local y = finger:FindFirstChild("y")
+    local z = finger:FindFirstChild("z")
+    if x and y and z then
+        return Vector3.new(x.Value, y.Value, z.Value)
+    end
+    local part = finger:FindFirstChildWhichIsA("BasePart", true)
+    return part and part.Position or nil
+end
+
+local function trocar_servidor()
+    print("Procurando novo servidor...")
+    local placeId = game.PlaceId
+    local cursor = nil
+    local tentativas = 0
+
+    repeat
+        tentativas += 1
+        local ok, result = pcall(function()
+            return ts:GetSortedGameInstances(placeId, 20, cursor)
+        end)
+
+        if not ok or not result then
+            task.wait(3)
+            break
+        end
+
+        for _, server in ipairs(result.Instances) do
+            if not visited_servers[server.Id] and server.Playing < server.MaxPlayers then
+                visited_servers[server.Id] = true
+                _G.visited_servers = visited_servers
+                print("Entrando em servidor:", server.Id)
+                ts:TeleportToPlaceInstance(placeId, server.Id, plr)
+                return
             end
         end
-        if #servers > 0 then
-            local randomServer = servers[math.random(1, #servers)]
-            TeleportService:TeleportToPlaceInstance(placeId, randomServer.id, player)
-        else
-            warn("Nenhum servidor válido encontrado para hop.")
+
+        cursor = result.NextPageCursor
+    until cursor == nil or tentativas >= 5
+
+    -- Sem servidores novos, reseta lista
+    print("Sem servidores novos, resetando lista...")
+    _G.visited_servers = {}
+    _G.visited_servers[game.JobId] = true
+    ts:Teleport(placeId, plr)
+end
+
+local function process_queue()
+    if collecting then return end
+    collecting = true
+    waiting_for_finger = false
+
+    while #finger_queue > 0 do
+        if not character_available() then task.wait(1) continue end
+
+        local nearest, nearestPos, shortest = nil, nil, math.huge
+        for i, finger in ipairs(finger_queue) do
+            if not finger or not finger.Parent then
+                table.remove(finger_queue, i)
+                continue
+            end
+            local pos = get_finger_pos(finger)
+            if pos then
+                local dist = (hrp.Position - pos).Magnitude
+                if dist < shortest then
+                    shortest = dist
+                    nearest = finger
+                    nearestPos = pos
+                end
+            end
         end
+
+        if not nearest then break end
+
+        print("Indo para dedo, distancia:", math.floor(shortest))
+
+        while nearest and nearest.Parent and nearest:IsDescendantOf(drops_path) do
+            if not character_available() then task.wait(1) break end
+            local pos = get_finger_pos(nearest)
+            if not pos then break end
+            go_to_pos_wait(pos, (hrp.Position - pos).Magnitude)
+            task.wait(0.3)
+        end
+
+        local idx = table.find(finger_queue, nearest)
+        if idx then table.remove(finger_queue, idx) end
+
+        print("Dedo coletado!")
+    end
+
+    collecting = false
+    print("Fila vazia! Aguardando novos dedos por 5 segundos antes de trocar servidor...")
+
+    -- Aguarda 5 segundos por novos dedos antes de trocar
+    waiting_for_finger = true
+    local t = 0
+    while t < 5 do
+        task.wait(1)
+        t += 1
+        if not waiting_for_finger then
+            -- Novo dedo apareceu, cancela o timer
+            return
+        end
+    end
+
+    -- 5 segundos sem dedo, troca servidor
+    print("5 segundos sem dedo, trocando servidor...")
+    trocar_servidor()
+end
+
+-- Dedos já existentes ao iniciar
+for _, v in pairs(drops_path:GetChildren()) do
+    if v.Name == "CursedFinger" then
+        table.insert(finger_queue, v)
+        print("Dedo existente detectado!")
     end
 end
 
-local function inject()
-    local character = player.Character or player.CharacterAdded:Wait()
-    local fingers = {}
-    local scanningIslands = true
-
-    local function addFinger(obj)
-        local part = obj:IsA("Model") and (obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")) or obj
-        if part and part:IsA("BasePart") then
-            if not table.find(fingers, part) then
-                table.insert(fingers, part)
-                scanningIslands = false -- achou dedo, para voo
-            end
+-- Detecta novos dedos em tempo real
+drops_path.ChildAdded:Connect(function(child)
+    if child.Name == "CursedFinger" then
+        print("Novo dedo detectado!")
+        table.insert(finger_queue, child)
+        if waiting_for_finger then
+            -- Cancela o timer e vai coletar
+            waiting_for_finger = false
+            task.spawn(process_queue)
+        elseif not collecting then
+            task.spawn(process_queue)
         end
     end
-
-    local function removeFinger(obj)
-        for i, part in ipairs(fingers) do
-            if part == obj or (obj:IsA("Model") and part:IsDescendantOf(obj)) then
-                table.remove(fingers, i)
-                break
-            end
-        end
-        if #fingers == 0 then
-            scanningIslands = true
-            task.spawn(islandScanLoop)
-        end
-    end
-
-    local function scanDrops()
-        for _, child in pairs(workspace.Drops:GetChildren()) do
-            local finger = child:FindFirstChild("CursedFinger")
-            if finger then
-                addFinger(finger)
-            end
-        end
-    end
-
-    local function watchDrops()
-        fingers = {}
-        scanDrops()
-
-        workspace.Drops.ChildAdded:Connect(function(newChild)
-            local finger = newChild:FindFirstChild("CursedFinger")
-            if finger then
-                addFinger(finger)
-            end
-        end)
-
-        workspace.Drops.ChildRemoved:Connect(function(oldChild)
-            local finger = oldChild:FindFirstChild("CursedFinger")
-            if finger then
-                removeFinger(finger)
-            end
-        end)
-    end
-
-    -- voo ajustado (um pouco mais lento e suave)
-    local function flyTo(targetPos)
-        if not character or not character.PrimaryPart then return end
-        local startPos = character.PrimaryPart.Position
-        local steps = 40 -- mais passos
-        for i = 1, steps do
-            if not scanningIslands then break end
-            local alpha = i / steps
-            local newPos = startPos:Lerp(targetPos, alpha)
-            character:SetPrimaryPartCFrame(CFrame.new(newPos))
-            task.wait(0.15) -- mais lento que antes
-        end
-    end
-
-    function islandScanLoop()
-        task.spawn(function()
-            local found = false
-            while scanningIslands do
-                for _, pos in ipairs(islandCenters) do
-                    if not scanningIslands then break end
-                    flyTo(pos)
-                    task.wait(2) -- espera maior entre ilhas
-                    scanDrops()
-                    if #fingers > 0 then
-                        found = true
-                        break
-                    end
-                end
-                if not found then
-                    serverHop() -- troca de servidor se não achou dedo
-                end
-            end
-        end)
-    end
-
-    local function getNearestFinger()
-        if not character or not character.PrimaryPart then return nil end
-        local nearest, dist = nil, math.huge
-        for _, part in ipairs(fingers) do
-            local d = (part.Position - character.PrimaryPart.Position).Magnitude
-            if d < dist then
-                dist = d
-                nearest = part
-            end
-        end
-        return nearest
-    end
-
-    local function teleportLoop()
-        while true do
-            local nearest = getNearestFinger()
-            if nearest then
-                character:SetPrimaryPartCFrame(CFrame.new(nearest.Position))
-            end
-            task.wait(1)
-        end
-    end
-
-    watchDrops()
-    task.spawn(islandScanLoop)
-    task.spawn(teleportLoop)
-end
-
-inject()
-
-player.CharacterAdded:Connect(function()
-    inject()
 end)
+
+if #finger_queue > 0 then
+    task.spawn(process_queue)
+else
+    -- Sem dedos ao iniciar, espera 5s antes de trocar
+    print("Nenhum dedo no servidor, aguardando 5 segundos...")
+    waiting_for_finger = true
+    task.spawn(function()
+        local t = 0
+        while t < 5 do
+            task.wait(1)
+            t += 1
+            if not waiting_for_finger then return end
+        end
+        print("5 segundos sem dedo, trocando servidor...")
+        trocar_servidor()
+    end)
+end
+
+print("Auto Fingers iniciado! Servidor:", game.JobId)
