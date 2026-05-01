@@ -68,7 +68,8 @@ local function trocar_servidor()
         end
 
         for _, server in ipairs(result.Instances) do
-            if not visited_servers[server.Id] and server.Playing < server.MaxPlayers then
+            -- checagem extra: não entrar no mesmo JobId atual
+            if server.Id ~= game.JobId and not visited_servers[server.Id] and server.Playing < server.MaxPlayers then
                 visited_servers[server.Id] = true
                 _G.visited_servers = visited_servers
                 print("Entrando em servidor:", server.Id)
