@@ -1,6 +1,11 @@
+if not game:IsLoaded() then
+    game.Loaded:Wait()
+end
+
 local players = game:GetService("Players")
 local tws = game:GetService("TweenService")
 local ts = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
 
 local plr = players.LocalPlayer
 local char = plr.Character or plr.CharacterAdded:Wait()
@@ -12,10 +17,19 @@ local finger_queue = {}
 local collecting = false
 local waiting_for_finger = false
 
--- Carrega servidores visitados de sessão anterior
-local visited_servers = _G.visited_servers or {}
-visited_servers[game.JobId] = true
-_G.visited_servers = visited_servers
+-- =========================
+-- 🔥 MEMÓRIA ENTRE SERVIDORES
+-- =========================
+getgenv().VisitedServers = getgenv().VisitedServers or {}
+local servidores_visitados = getgenv().VisitedServers
+
+local function save_memory()
+    if queue_on_teleport then
+        queue_on_teleport("getgenv().VisitedServers = " .. HttpService:JSONEncode(servidores_visitados))
+    elseif syn and syn.queue_on_teleport then
+        syn.queue_on_teleport("getgenv().VisitedServers = " .. HttpService:JSONEncode(servidores_visitados))
+    end
+end
 
 local function character_available()
     local available = false
@@ -31,9 +45,12 @@ end
 
 local function go_to_pos_wait(pos, magnitude)
     if not character_available() then return end
-    local time_ = math.clamp(magnitude / 200, 0.01, 15)
+    
+    -- ⚡ um pouco mais rápido (seguro)
+    local time_ = math.clamp(magnitude / 85, 0.2, 25)
+    
     if typeof(pos) == "Vector3" then pos = CFrame.new(pos) end
-    local tween = tws:Create(hrp, TweenInfo.new(time_), {CFrame = pos})
+    local tween = tws:Create(hrp, TweenInfo.new(time_, Enum.EasingStyle.Linear), {CFrame = pos})
     tween:Play()
     tween.Completed:Wait()
     if hrp then hrp.Anchored = false end
@@ -50,41 +67,76 @@ local function get_finger_pos(finger)
     return part and part.Position or nil
 end
 
+-- =========================
+-- 🔥 SERVER HOP INTELIGENTE
+-- =========================
 local function trocar_servidor()
-    print("Procurando novo servidor...")
     local placeId = game.PlaceId
-    local cursor = nil
-    local tentativas = 0
+    local cursor = ""
+    local achou = false
 
-    repeat
-        tentativas += 1
-        local ok, result = pcall(function()
-            return ts:GetSortedGameInstances(placeId, 20, cursor)
+    print("Buscando servidores...")
+
+    for i = 1, 5 do
+        local url = "https://games.roblox.com/v1/games/"..placeId.."/servers/Public?sortOrder=Asc&limit=100&cursor="..cursor
+
+        local ok, res = pcall(function()
+            return HttpService:JSONDecode(game:HttpGet(url))
         end)
 
-        if not ok or not result then
-            task.wait(3)
+        if ok and res and res.data then
+            for _, server in ipairs(res.data) do
+                if server.playing >= 5 and server.playing < server.maxPlayers and server.id ~= game.JobId then
+                    if not servidores_visitados[server.id] then
+                        servidores_visitados[server.id] = true
+                        save_memory()
+
+                        print("Entrando em servidor novo:", server.id)
+
+                        task.wait(1)
+                        ts:TeleportToPlaceInstance(placeId, server.id, plr)
+                        achou = true
+                        return
+                    end
+                end
+            end
+
+            cursor = res.nextPageCursor or ""
+        else
+            warn("Erro ao buscar servidores")
             break
         end
+    end
 
-        for _, server in ipairs(result.Instances) do
-            -- checagem extra: não entrar no mesmo JobId atual
-            if server.Id ~= game.JobId and not visited_servers[server.Id] and server.Playing < server.MaxPlayers then
-                visited_servers[server.Id] = true
-                _G.visited_servers = visited_servers
-                print("Entrando em servidor:", server.Id)
-                ts:TeleportToPlaceInstance(placeId, server.Id, plr)
-                return
+    -- fallback inteligente (NÃO reseta memória fácil)
+    if not achou then
+        print("Nenhum servidor novo... tentando fallback")
+
+        local url = "https://games.roblox.com/v1/games/"..placeId.."/servers/Public?sortOrder=Desc&limit=100"
+
+        local ok, res = pcall(function()
+            return HttpService:JSONDecode(game:HttpGet(url))
+        end)
+
+        if ok and res and res.data then
+            for _, server in ipairs(res.data) do
+                if server.playing > 5 and server.id ~= game.JobId then
+                    print("Fallback entrando:", server.id)
+
+                    servidores_visitados[server.id] = true
+                    save_memory()
+
+                    task.wait(1)
+                    ts:TeleportToPlaceInstance(placeId, server.id, plr)
+                    return
+                end
             end
         end
 
-        cursor = result.NextPageCursor
-    until cursor == nil or tentativas >= 5
-
-    -- Se não achou nenhum servidor novo, não volta pro mesmo
-    print("Nenhum servidor novo encontrado, tentando novamente em alguns segundos...")
-    task.wait(5)
-    trocar_servidor()
+        print("Nada encontrado... aguardando antes de tentar novamente")
+        task.wait(15)
+        trocar_servidor()
+    end
 end
 
 local function process_queue()
@@ -131,26 +183,23 @@ local function process_queue()
     end
 
     collecting = false
-    print("Fila vazia! Aguardando novos dedos por 5 segundos antes de trocar servidor...")
+    print("Fila vazia! Aguardando mais tempo antes de trocar servidor...")
 
-    -- Aguarda 5 segundos por novos dedos antes de trocar
     waiting_for_finger = true
     local t = 0
-    while t < 5 do
+    while t < 20 do -- ⬅️ aumentado
         task.wait(1)
         t += 1
-        if not waiting_for_finger then
-            -- Novo dedo apareceu, cancela o timer
-            return
-        end
+        if not waiting_for_finger then return end
     end
 
-    -- 5 segundos sem dedo, troca servidor
-    print("5 segundos sem dedo, trocando servidor...")
-    trocar_servidor()
+    if waiting_for_finger then
+        print("Servidor realmente vazio, trocando...")
+        trocar_servidor()
+    end
 end
 
--- Dedos já existentes ao iniciar
+-- resto do script (INALTERADO)
 for _, v in pairs(drops_path:GetChildren()) do
     if v.Name == "CursedFinger" then
         table.insert(finger_queue, v)
@@ -158,13 +207,11 @@ for _, v in pairs(drops_path:GetChildren()) do
     end
 end
 
--- Detecta novos dedos em tempo real
 drops_path.ChildAdded:Connect(function(child)
     if child.Name == "CursedFinger" then
         print("Novo dedo detectado!")
         table.insert(finger_queue, child)
         if waiting_for_finger then
-            -- Cancela o timer e vai coletar
             waiting_for_finger = false
             task.spawn(process_queue)
         elseif not collecting then
@@ -176,18 +223,18 @@ end)
 if #finger_queue > 0 then
     task.spawn(process_queue)
 else
-    -- Sem dedos ao iniciar, espera 5s antes de trocar
-    print("Nenhum dedo no servidor, aguardando 5 segundos...")
+    print("Nenhum dedo no servidor, aguardando...")
     waiting_for_finger = true
     task.spawn(function()
         local t = 0
-        while t < 5 do
+        while t < 20 do
             task.wait(1)
             t += 1
             if not waiting_for_finger then return end
         end
-        print("5 segundos sem dedo, trocando servidor...")
-        trocar_servidor()
+        if waiting_for_finger then
+            trocar_servidor()
+        end
     end)
 end
 
