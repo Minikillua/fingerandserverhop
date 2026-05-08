@@ -241,38 +241,71 @@ else
 end
 
 -- =========================
--- 🔄 AUTO RECONNECT SIMPLES
+-- 🔄 AUTO RECONNECT ROBUSTO
 -- =========================
 local GuiService = game:GetService("GuiService")
 local TeleportService = game:GetService("TeleportService")
+local Players = game:GetService("Players")
 
 local reconnecting = false
+local function tentar_reconectar()
+    if reconnecting then return end
+    reconnecting = true
 
+    warn("Tentando reconectar...")
+
+    task.wait(3) -- pequena pausa para evitar loop instantâneo
+
+    local ok = pcall(function()
+        TeleportService:Teleport(game.PlaceId, Players.LocalPlayer)
+    end)
+
+    if not ok then
+        warn("Falha ao reconectar, tentando novamente em 5s...")
+        task.wait(5)
+        pcall(function()
+            TeleportService:Teleport(game.PlaceId, Players.LocalPlayer)
+        end)
+    end
+
+    reconnecting = false
+end
+
+-- captura mensagens de erro
 GuiService.ErrorMessageChanged:Connect(function()
     local msg = GuiService:GetErrorMessage()
-
-    if msg and msg ~= "" and not reconnecting then
-        reconnecting = true
-
+    if msg and msg ~= "" then
         warn("Desconectado:", msg)
+        tentar_reconectar()
+    end
+end)
 
-        -- pequena espera pra evitar loop instantâneo
-        task.wait(3)
+-- captura falhas de teleporte
+Players.LocalPlayer.OnTeleport:Connect(function(state)
+    if state == Enum.TeleportState.Failed then
+        warn("Falha no teleporte detectada!")
+        tentar_reconectar()
+    end
+end)
 
-        -- tenta voltar para o mesmo lugar (place)
-        local ok = pcall(function()
-            TeleportService:Teleport(game.PlaceId, plr)
-        end)
+-- captura inatividade (idle kick)
+Players.LocalPlayer.Idled:Connect(function()
+    warn("Idle detectado, prevenindo kick...")
+    local VirtualUser = game:GetService("VirtualUser")
+    VirtualUser:Button2Down(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+    task.wait(1)
+    VirtualUser:Button2Up(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+end)
 
-        if not ok then
-            warn("Falha ao reconectar, tentando novamente em 5s...")
-            task.wait(5)
-
-            pcall(function()
-                TeleportService:Teleport(game.PlaceId, plr)
-            end)
+-- fallback de segurança: loop que verifica se ainda está conectado
+task.spawn(function()
+    while true do
+        task.wait(30)
+        if not game:IsLoaded() or not Players.LocalPlayer then
+            warn("Sessão perdida, tentando reconectar...")
+            tentar_reconectar()
         end
     end
 end)
 
-print("Auto Fingers iniciado! Servidor:", game.JobId)
+print("Auto Fingers iniciado com Auto Reconnect robusto! Servidor:", game.JobId)
